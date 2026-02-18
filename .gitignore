@@ -1,0 +1,36 @@
+/target
+**/*.rs.bk
+Cargo.lock
+*.swp
+*.swo
+*~
+.DS_Store
+.vscode/
+.idea/
+*.iml
+
+# Model files
+*.onnx
+*.bin
+*.safetensors
+models/
+checkpoints/
+
+# Audio files for testing
+*.wav
+*.mp3
+*.opus
+*.flac
+*.aac
+*.pcm
+
+# Environment files
+.env
+.env.local
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+test_output/
