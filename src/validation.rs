@@ -245,7 +245,9 @@ pub fn validate_input(input: &str, max_chars: usize) -> ApiResult<()> {
         return Err(AppError::invalid_request("Input text cannot be empty"));
     }
 
-    if input.len() > max_chars {
+    let input_chars = input.chars().count();
+
+    if input_chars > max_chars {
         return Err(AppError::invalid_request(format!(
             "Input text exceeds maximum length of {} characters",
             max_chars
@@ -302,8 +304,8 @@ pub struct Voice {
 }
 
 /// Get all available Kokoro voices (returns reference to static)
-pub fn get_available_voices() -> &'static Vec<Voice> {
-    &AVAILABLE_VOICES
+pub fn get_available_voices() -> &'static [Voice] {
+    AVAILABLE_VOICES.as_slice()
 }
 
 #[cfg(test)]

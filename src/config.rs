@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionProvider {
+pub enum AccelerationKind {
     Auto,
     Cpu,
     CoreML,
@@ -12,7 +12,7 @@ pub enum ExecutionProvider {
     DirectML,
 }
 
-impl FromStr for ExecutionProvider {
+impl FromStr for AccelerationKind {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -27,7 +27,7 @@ impl FromStr for ExecutionProvider {
     }
 }
 
-impl std::fmt::Display for ExecutionProvider {
+impl std::fmt::Display for AccelerationKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => write!(f, "auto"),
@@ -45,7 +45,7 @@ pub struct Config {
     pub port: u16,
     pub api_key: Option<String>,
     pub model_path: Option<PathBuf>,
-    pub execution_provider: ExecutionProvider,
+    pub acceleration: AccelerationKind,
     pub workers: usize,
     pub max_input_chars: usize,
 }
@@ -59,7 +59,7 @@ impl Config {
             port: cli.port,
             api_key: cli.api_key,
             model_path: cli.model_path,
-            execution_provider: cli.execution_provider,
+            acceleration: cli.acceleration,
             workers: cli.workers,
             max_input_chars: cli.max_input_chars,
         };
@@ -88,20 +88,20 @@ impl Config {
 
         // Validate execution provider based on platform
         #[cfg(not(target_os = "macos"))]
-        if self.execution_provider == ExecutionProvider::CoreML {
+        if self.acceleration == AccelerationKind::CoreML {
             anyhow::bail!("CoreML is only available on macOS");
         }
 
         #[cfg(not(target_os = "windows"))]
-        if self.execution_provider == ExecutionProvider::DirectML {
+        if self.acceleration == AccelerationKind::DirectML {
             anyhow::bail!("DirectML is only available on Windows");
         }
 
         Ok(())
     }
 
-    pub fn accepted_model_ids() -> Vec<&'static str> {
-        vec!["tts-1", "kokoro"]
+    pub fn accepted_model_ids() -> &'static [&'static str] {
+        &["tts-1", "kokoro"]
     }
 }
 
@@ -123,19 +123,19 @@ struct CliArgs {
     api_key: Option<String>,
 
     /// Path to model files (optional, will download if not provided)
-    #[arg(long, env = "MODEL_PATH")]
+    #[arg(long, env = "KOKORO_MODEL_PATH")]
     model_path: Option<PathBuf>,
 
-    /// Execution provider for inference
-    #[arg(long, env = "EXECUTION_PROVIDER", default_value = "auto")]
-    execution_provider: ExecutionProvider,
+    /// Acceleration mode for inference (auto, cpu, coreml, cuda, directml)
+    #[arg(long, env = "KOKORO_ACCELERATION", default_value = "auto")]
+    acceleration: AccelerationKind,
 
     /// Number of worker threads for parallel inference
-    #[arg(long, env = "WORKERS", default_value = "2")]
+    #[arg(long, env = "KOKORO_WORKERS", default_value = "1")]
     workers: usize,
 
     /// Maximum characters allowed in input text
-    #[arg(long, env = "MAX_INPUT_CHARS", default_value = "4096")]
+    #[arg(long, env = "KOKORO_MAX_INPUT_CHARS", default_value = "4096")]
     max_input_chars: usize,
 }
 
@@ -144,24 +144,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_execution_provider_parsing() {
+    fn test_acceleration_parsing() {
         assert_eq!(
-            ExecutionProvider::from_str("auto").unwrap(),
-            ExecutionProvider::Auto
+            AccelerationKind::from_str("auto").unwrap(),
+            AccelerationKind::Auto
         );
         assert_eq!(
-            ExecutionProvider::from_str("cpu").unwrap(),
-            ExecutionProvider::Cpu
+            AccelerationKind::from_str("cpu").unwrap(),
+            AccelerationKind::Cpu
         );
         assert_eq!(
-            ExecutionProvider::from_str("coreml").unwrap(),
-            ExecutionProvider::CoreML
+            AccelerationKind::from_str("coreml").unwrap(),
+            AccelerationKind::CoreML
         );
         assert_eq!(
-            ExecutionProvider::from_str("CORE_ML").unwrap(),
-            ExecutionProvider::CoreML
+            AccelerationKind::from_str("CORE_ML").unwrap(),
+            AccelerationKind::CoreML
         );
-        assert!(ExecutionProvider::from_str("invalid").is_err());
+        assert!(AccelerationKind::from_str("invalid").is_err());
     }
 
     #[test]
@@ -171,8 +171,8 @@ mod tests {
             port: 8000,
             api_key: None,
             model_path: None,
-            execution_provider: ExecutionProvider::Cpu,
-            workers: 2,
+            acceleration: AccelerationKind::Cpu,
+            workers: 1,
             max_input_chars: 4096,
         };
         assert!(valid_config.validate().is_ok());

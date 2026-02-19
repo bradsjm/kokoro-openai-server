@@ -1,12 +1,10 @@
-use crate::{
-    backend::KokoroBackend,
-    error::AppError,
-};
+use crate::{backend::KokoroBackend, error::AppError, validation::DEFAULT_SAMPLE_RATE};
 use axum::body::{Body, Bytes};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
+const STREAM_CHANNEL_CAPACITY: usize = 8;
 
 /// Create a PCM audio stream
 pub async fn create_pcm_stream(
@@ -18,7 +16,7 @@ pub async fn create_pcm_stream(
 ) -> Result<Body, AppError> {
     // Chunk the text by sentences/phrases
     let chunks = chunk_text(&text);
-    
+
     debug!(
         request_id = %request_id,
         num_chunks = chunks.len(),
@@ -26,7 +24,7 @@ pub async fn create_pcm_stream(
         chunks.len()
     );
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(STREAM_CHANNEL_CAPACITY);
 
     // Spawn synthesis task
     tokio::spawn(async move {
@@ -42,8 +40,8 @@ pub async fn create_pcm_stream(
                 Ok(audio) => {
                     // Convert f32 samples to PCM bytes
                     let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
-                    
-                    if tx.send(Ok(Bytes::from(pcm_bytes))).is_err() {
+
+                    if tx.send(Ok(Bytes::from(pcm_bytes))).await.is_err() {
                         warn!("Stream receiver dropped, stopping synthesis");
                         break;
                     }
@@ -55,9 +53,12 @@ pub async fn create_pcm_stream(
                         error = %e,
                         "Chunk synthesis failed"
                     );
-                    let _ = tx.send(Err(std::io::Error::other(
-                        format!("Synthesis failed: {}", e)
-                    )));
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "Synthesis failed: {}",
+                            e
+                        ))))
+                        .await;
                     break;
                 }
             }
@@ -93,7 +94,7 @@ pub async fn create_wav_stream(
     // 3. Update header with final size (optional for streaming)
 
     let chunks = chunk_text(&text);
-    
+
     debug!(
         request_id = %request_id,
         num_chunks = chunks.len(),
@@ -101,18 +102,18 @@ pub async fn create_wav_stream(
         chunks.len()
     );
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<Result<Bytes, std::io::Error>>();
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(STREAM_CHANNEL_CAPACITY);
 
     // Spawn synthesis task
     tokio::spawn(async move {
-        const SAMPLE_RATE: u32 = 24000;
         const BITS_PER_SAMPLE: u16 = 16;
         const NUM_CHANNELS: u16 = 1;
 
         // Write WAV header (44 bytes, will be placeholder for streaming)
-        let header = create_wav_header_placeholder(SAMPLE_RATE, BITS_PER_SAMPLE, NUM_CHANNELS);
-        
-        if tx.send(Ok(Bytes::from(header))).is_err() {
+        let header =
+            create_wav_header_placeholder(DEFAULT_SAMPLE_RATE, BITS_PER_SAMPLE, NUM_CHANNELS);
+
+        if tx.send(Ok(Bytes::from(header))).await.is_err() {
             warn!("Stream receiver dropped immediately");
             return;
         }
@@ -132,8 +133,8 @@ pub async fn create_wav_stream(
                     // Convert f32 samples to PCM bytes
                     let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
                     total_samples += audio.samples.len() as u32;
-                    
-                    if tx.send(Ok(Bytes::from(pcm_bytes))).is_err() {
+
+                    if tx.send(Ok(Bytes::from(pcm_bytes))).await.is_err() {
                         warn!("Stream receiver dropped, stopping synthesis");
                         break;
                     }
@@ -145,9 +146,12 @@ pub async fn create_wav_stream(
                         error = %e,
                         "Chunk synthesis failed"
                     );
-                    let _ = tx.send(Err(std::io::Error::other(
-                        format!("Synthesis failed: {}", e)
-                    )));
+                    let _ = tx
+                        .send(Err(std::io::Error::other(format!(
+                            "Synthesis failed: {}",
+                            e
+                        ))))
+                        .await;
                     break;
                 }
             }
@@ -207,28 +211,40 @@ fn chunk_text(text: &str) -> Vec<String> {
 /// Convert f32 samples [-1.0, 1.0] to 16-bit PCM bytes
 fn samples_to_pcm_bytes(samples: &[f32]) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(samples.len() * 2);
-    
+
     for &sample in samples {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let int_sample = (clamped * i16::MAX as f32) as i16;
+        let int_sample = pcm_i16_from_f32(sample);
         bytes.extend_from_slice(&int_sample.to_le_bytes());
     }
-    
+
     bytes
 }
 
+fn pcm_i16_from_f32(sample: f32) -> i16 {
+    let clamped = sample.clamp(-1.0, 1.0);
+    if clamped <= -1.0 {
+        i16::MIN
+    } else {
+        (clamped * i16::MAX as f32).round() as i16
+    }
+}
+
 /// Create WAV header placeholder for streaming
-fn create_wav_header_placeholder(sample_rate: u32, bits_per_sample: u16, num_channels: u16) -> Vec<u8> {
+fn create_wav_header_placeholder(
+    sample_rate: u32,
+    bits_per_sample: u16,
+    num_channels: u16,
+) -> Vec<u8> {
     let byte_rate = sample_rate * num_channels as u32 * (bits_per_sample / 8) as u32;
     let block_align = num_channels * (bits_per_sample / 8);
-    
+
     let mut header = Vec::with_capacity(44);
-    
+
     // RIFF chunk descriptor
     header.extend_from_slice(b"RIFF");
     header.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // File size (unknown for streaming)
     header.extend_from_slice(b"WAVE");
-    
+
     // fmt sub-chunk
     header.extend_from_slice(b"fmt ");
     header.extend_from_slice(&16u32.to_le_bytes()); // Subchunk1Size (16 for PCM)
@@ -238,11 +254,11 @@ fn create_wav_header_placeholder(sample_rate: u32, bits_per_sample: u16, num_cha
     header.extend_from_slice(&byte_rate.to_le_bytes());
     header.extend_from_slice(&block_align.to_le_bytes());
     header.extend_from_slice(&bits_per_sample.to_le_bytes());
-    
+
     // data sub-chunk
     header.extend_from_slice(b"data");
     header.extend_from_slice(&0xFFFFFFFFu32.to_le_bytes()); // Subchunk2Size (unknown for streaming)
-    
+
     header
 }
 
@@ -273,14 +289,14 @@ mod tests {
         let samples = vec![0.0, 0.5, -0.5, 1.0, -1.0];
         let bytes = samples_to_pcm_bytes(&samples);
         assert_eq!(bytes.len(), 10); // 5 samples * 2 bytes
-        
+
         // Check that 0.0 maps to 0
         assert_eq!(bytes[0..2], [0, 0]);
-        
+
         // Check that 1.0 maps to i16::MAX
         let max_val = i16::MAX.to_le_bytes();
         assert_eq!(bytes[6..8], max_val);
-        
+
         // Check that -1.0 maps to i16::MIN
         let min_val = i16::MIN.to_le_bytes();
         assert_eq!(bytes[8..10], min_val);
@@ -290,14 +306,14 @@ mod tests {
     fn test_wav_header() {
         let header = create_wav_header_placeholder(24000, 16, 1);
         assert_eq!(header.len(), 44);
-        
+
         // Check RIFF header
         assert_eq!(&header[0..4], b"RIFF");
         assert_eq!(&header[8..12], b"WAVE");
-        
+
         // Check fmt chunk
         assert_eq!(&header[12..16], b"fmt ");
-        
+
         // Check data chunk
         assert_eq!(&header[36..40], b"data");
     }

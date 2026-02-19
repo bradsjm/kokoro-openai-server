@@ -47,11 +47,32 @@ fn default_voice() -> String {
 }
 
 fn default_response_format() -> String {
-    "mp3".to_string() // Will be rejected with 400, but matches OpenAI default
+    "wav".to_string()
 }
 
 fn default_speed() -> f32 {
     1.0
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+
+    let mut diff = a_bytes.len() ^ b_bytes.len();
+    for i in 0..a_bytes.len().min(b_bytes.len()) {
+        diff |= usize::from(a_bytes[i] ^ b_bytes[i]);
+    }
+
+    diff == 0
+}
+
+fn pcm_i16_from_f32(sample: f32) -> i16 {
+    let clamped = sample.clamp(-1.0, 1.0);
+    if clamped <= -1.0 {
+        i16::MIN
+    } else {
+        (clamped * i16::MAX as f32).round() as i16
+    }
 }
 
 /// Response body for GET /v1/models
@@ -85,7 +106,11 @@ pub struct AppState {
 }
 
 /// Create the API router
-pub fn create_router(backend: Arc<KokoroBackend>, api_key: Option<String>, max_input_chars: usize) -> Router {
+pub fn create_router(
+    backend: Arc<KokoroBackend>,
+    api_key: Option<String>,
+    max_input_chars: usize,
+) -> Router {
     let state = AppState {
         backend,
         api_key,
@@ -130,7 +155,7 @@ async fn auth_middleware(
         match auth_header {
             Some(header) if header.starts_with("Bearer ") => {
                 let provided_key = &header[7..];
-                if provided_key != expected_key {
+                if !constant_time_eq(provided_key, expected_key) {
                     warn!("Invalid API key provided");
                     return AppError::Unauthorized.into_response();
                 }
@@ -157,9 +182,12 @@ async fn root_handler() -> impl IntoResponse {
 /// Health check handler
 async fn health_handler(State(state): State<AppState>) -> impl IntoResponse {
     let healthy = state.backend.is_healthy().await;
-    
+
     if healthy {
-        (StatusCode::OK, Json(serde_json::json!({"status": "healthy"})))
+        (
+            StatusCode::OK,
+            Json(serde_json::json!({"status": "healthy"})),
+        )
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -193,8 +221,8 @@ async fn list_models_handler() -> ApiResult<impl IntoResponse> {
 
 /// List available voices
 async fn list_voices_handler() -> impl IntoResponse {
-    let voices = get_available_voices().clone();
-    
+    let voices = get_available_voices().to_vec();
+
     Json(VoicesResponse {
         object: "list".to_string(),
         data: voices,
@@ -207,7 +235,7 @@ async fn speech_handler(
     Json(req): Json<SpeechRequest>,
 ) -> ApiResult<impl IntoResponse> {
     let request_id = Uuid::new_v4().to_string();
-    
+
     debug!(
         request_id = %request_id,
         model = %req.model,
@@ -228,7 +256,7 @@ async fn speech_handler(
 
     // Validate voice
     let voices = get_available_voices();
-    let _voice = validate_voice(&req.voice, &voices)?;
+    let _voice = validate_voice(&req.voice, voices)?;
 
     // Validate speed
     let speed = validate_speed(req.speed)?;
@@ -282,10 +310,7 @@ async fn speech_handler(
         // Non-streaming response
         let audio_data = state
             .backend
-            .synthesize(&req.input,
-                &req.voice,
-                speed,
-            )
+            .synthesize(&req.input, &req.voice, speed)
             .await
             .map_err(|e| {
                 error!("Synthesis failed: {}", e);
@@ -296,15 +321,10 @@ async fn speech_handler(
         let (content_type, bytes) = if format == "wav" {
             (
                 "audio/wav",
-                encode_wav(&audio_data.samples,
-                    audio_data.sample_rate,
-                )?,
+                encode_wav(&audio_data.samples, audio_data.sample_rate)?,
             )
         } else {
-            (
-                "audio/pcm",
-                encode_pcm(&audio_data.samples),
-            )
+            ("audio/pcm", encode_pcm(&audio_data.samples))
         };
 
         info!(
@@ -337,18 +357,16 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Bytes, AppError> {
 
     let mut cursor = Cursor::new(Vec::new());
     {
-        let mut writer = WavWriter::new(&mut cursor, spec)
-            .map_err(|_e| AppError::Internal)?;
-        
+        let mut writer = WavWriter::new(&mut cursor, spec).map_err(|_e| AppError::Internal)?;
+
         for &sample in samples {
-            let clamped = sample.clamp(-1.0, 1.0);
-            let int_sample = (clamped * i16::MAX as f32) as i16;
-            writer.write_sample(int_sample)
+            let int_sample = pcm_i16_from_f32(sample);
+            writer
+                .write_sample(int_sample)
                 .map_err(|_e| AppError::Internal)?;
         }
-        
-        writer.finalize()
-            .map_err(|_e| AppError::Internal)?;
+
+        writer.finalize().map_err(|_e| AppError::Internal)?;
     }
 
     Ok(Bytes::from(cursor.into_inner()))
@@ -357,12 +375,11 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Bytes, AppError> {
 /// Encode float samples to raw PCM (16-bit little-endian)
 fn encode_pcm(samples: &[f32]) -> Bytes {
     let mut bytes = Vec::with_capacity(samples.len() * 2);
-    
+
     for &sample in samples {
-        let clamped = sample.clamp(-1.0, 1.0);
-        let int_sample = (clamped * i16::MAX as f32) as i16;
+        let int_sample = pcm_i16_from_f32(sample);
         bytes.extend_from_slice(&int_sample.to_le_bytes());
     }
-    
+
     Bytes::from(bytes)
 }
