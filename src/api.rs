@@ -256,7 +256,7 @@ async fn speech_handler(
 
     // Validate voice
     let voices = get_available_voices();
-    let _voice = validate_voice(&req.voice, voices)?;
+    let voice = validate_voice(&req.voice, voices)?;
 
     // Validate speed
     let speed = validate_speed(req.speed)?;
@@ -272,7 +272,7 @@ async fn speech_handler(
                 crate::streaming::create_wav_stream(
                     state.backend.clone(),
                     req.input,
-                    req.voice,
+                    voice,
                     speed,
                     request_id.clone(),
                 )
@@ -284,7 +284,7 @@ async fn speech_handler(
                 crate::streaming::create_pcm_stream(
                     state.backend.clone(),
                     req.input,
-                    req.voice,
+                    voice,
                     speed,
                     request_id.clone(),
                 )
@@ -310,7 +310,7 @@ async fn speech_handler(
         // Non-streaming response
         let audio_data = state
             .backend
-            .synthesize(&req.input, &req.voice, speed)
+            .synthesize(&req.input, &voice, speed)
             .await
             .map_err(|e| {
                 error!("Synthesis failed: {}", e);

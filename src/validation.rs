@@ -269,10 +269,24 @@ pub fn validate_model(model: &str) -> ApiResult<String> {
 
 /// Validate voice ID against available voices
 pub fn validate_voice(voice: &str, available_voices: &[Voice]) -> ApiResult<String> {
-    if available_voices.iter().any(|v| v.id == voice) {
-        Ok(voice.to_string())
+    let resolved_voice = resolve_legacy_voice_alias(voice);
+
+    if available_voices.iter().any(|v| v.id == resolved_voice) {
+        Ok(resolved_voice.to_string())
     } else {
         Err(AppError::voice_not_found(voice))
+    }
+}
+
+fn resolve_legacy_voice_alias(voice: &str) -> &str {
+    match voice {
+        "alloy" => "af_alloy",
+        "echo" => "am_echo",
+        "fable" => "bm_fable",
+        "nova" => "af_nova",
+        "onyx" => "am_onyx",
+        "shimmer" => "af_shimmer",
+        _ => voice,
     }
 }
 
@@ -344,5 +358,48 @@ mod tests {
         assert!(validate_speed(0.24).is_err());
         assert!(validate_speed(4.01).is_err());
         assert!(validate_speed(f32::NAN).is_err());
+    }
+
+    #[test]
+    fn test_validate_voice_accepts_legacy_aliases() {
+        let voices = vec![
+            Voice {
+                id: "af_alloy".to_string(),
+                name: "Alloy".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "am_echo".to_string(),
+                name: "Echo".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "bm_fable".to_string(),
+                name: "Fable".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "af_nova".to_string(),
+                name: "Nova".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "am_onyx".to_string(),
+                name: "Onyx".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "af_shimmer".to_string(),
+                name: "Shimmer".to_string(),
+                preview_url: None,
+            },
+        ];
+
+        assert_eq!(validate_voice("alloy", &voices).unwrap(), "af_alloy");
+        assert_eq!(validate_voice("echo", &voices).unwrap(), "am_echo");
+        assert_eq!(validate_voice("fable", &voices).unwrap(), "bm_fable");
+        assert_eq!(validate_voice("nova", &voices).unwrap(), "af_nova");
+        assert_eq!(validate_voice("onyx", &voices).unwrap(), "am_onyx");
+        assert_eq!(validate_voice("shimmer", &voices).unwrap(), "af_shimmer");
     }
 }
