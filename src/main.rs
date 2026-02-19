@@ -17,7 +17,7 @@ async fn main() -> Result<()> {
     // Initialize tracing
     let filter = std::env::var("RUST_LOG")
         .unwrap_or_else(|_| "kokoro_openai_server=info,axum=info".to_string());
-    
+
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(true)
@@ -26,17 +26,20 @@ async fn main() -> Result<()> {
         .with_line_number(false)
         .init();
 
-    info!("Starting Kokoro OpenAI Server v{}", env!("CARGO_PKG_VERSION"));
+    info!(
+        "Starting Kokoro OpenAI Server v{}",
+        env!("CARGO_PKG_VERSION")
+    );
 
     // Parse configuration
     let config = Config::from_env_and_args().context("Failed to parse configuration")?;
-    
+
     info!("Configuration loaded:");
     info!("  Host: {}:{}", config.host, config.port);
     info!("  Workers: {}", config.workers);
     info!("  Max input chars: {}", config.max_input_chars);
-    info!("  Execution provider: {:?}", config.execution_provider);
-    
+    info!("  Acceleration: {:?}", config.acceleration);
+
     if config.api_key.is_some() {
         info!("  Authentication: enabled");
     } else {
@@ -47,11 +50,15 @@ async fn main() -> Result<()> {
     let backend = backend::KokoroBackend::new(&config)
         .await
         .context("Failed to initialize Kokoro backend")?;
-    
+
     info!("Backend initialized successfully");
 
     // Build router
-    let app = api::create_router(Arc::new(backend), config.api_key.clone(), config.max_input_chars);
+    let app = api::create_router(
+        Arc::new(backend),
+        config.api_key.clone(),
+        config.max_input_chars,
+    );
 
     // Create socket address
     let addr: SocketAddr = format!("{}:{}", config.host, config.port)
@@ -62,7 +69,7 @@ async fn main() -> Result<()> {
 
     // Start server with graceful shutdown
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    
+
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
