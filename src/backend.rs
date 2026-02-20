@@ -66,7 +66,13 @@ impl KokoroBackend {
     }
 
     /// Synthesize speech from text
-    pub async fn synthesize(&self, text: &str, voice_id: &str, speed: f32) -> Result<AudioData> {
+    pub async fn synthesize(
+        &self,
+        text: &str,
+        voice_id: &str,
+        speed: f32,
+        initial_silence: Option<usize>,
+    ) -> Result<AudioData> {
         // Acquire permit for concurrent limit
         let _permit = self
             .semaphore
@@ -89,8 +95,11 @@ impl KokoroBackend {
         // Run inference in blocking task
         let samples = tokio::task::spawn_blocking(move || {
             match tts_engine.tts_raw_audio(
-                &text, "en-us", // Default language
-                &voice_id, speed, None, // initial_silence
+                &text,
+                "en-us", // Default language
+                &voice_id,
+                speed,
+                initial_silence,
                 None, // request_id
                 None, // instance_id
                 None, // chunk_number

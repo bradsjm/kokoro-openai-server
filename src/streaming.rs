@@ -1,10 +1,14 @@
 use crate::{backend::KokoroBackend, error::AppError, validation::DEFAULT_SAMPLE_RATE};
 use axum::body::{Body, Bytes};
-use std::sync::Arc;
+use regex::Regex;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 const STREAM_CHANNEL_CAPACITY: usize = 8;
+const BREAK_WORDS: &[&str] = &[
+    "and", "or", "but", "&", "because", "if", "since", "though", "although", "however", "which",
+];
 
 /// Create a PCM audio stream
 pub async fn create_pcm_stream(
@@ -12,6 +16,7 @@ pub async fn create_pcm_stream(
     text: String,
     voice: String,
     speed: f32,
+    initial_silence: Option<usize>,
     request_id: String,
 ) -> Result<Body, AppError> {
     // Chunk the text by sentences/phrases
@@ -29,6 +34,7 @@ pub async fn create_pcm_stream(
     // Spawn synthesis task
     tokio::spawn(async move {
         for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_silence = if idx == 0 { initial_silence } else { None };
             debug!(
                 request_id = %request_id,
                 chunk_idx = idx,
@@ -36,7 +42,10 @@ pub async fn create_pcm_stream(
                 "Synthesizing chunk"
             );
 
-            match backend.synthesize(chunk, &voice, speed).await {
+            match backend
+                .synthesize(chunk, &voice, speed, chunk_silence)
+                .await
+            {
                 Ok(audio) => {
                     // Convert f32 samples to PCM bytes
                     let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
@@ -86,6 +95,7 @@ pub async fn create_wav_stream(
     text: String,
     voice: String,
     speed: f32,
+    initial_silence: Option<usize>,
     request_id: String,
 ) -> Result<Body, AppError> {
     // For WAV streaming, we need to:
@@ -121,6 +131,7 @@ pub async fn create_wav_stream(
         let mut total_samples: u32 = 0;
 
         for (idx, chunk) in chunks.iter().enumerate() {
+            let chunk_silence = if idx == 0 { initial_silence } else { None };
             debug!(
                 request_id = %request_id,
                 chunk_idx = idx,
@@ -128,7 +139,10 @@ pub async fn create_wav_stream(
                 "Synthesizing chunk for WAV"
             );
 
-            match backend.synthesize(chunk, &voice, speed).await {
+            match backend
+                .synthesize(chunk, &voice, speed, chunk_silence)
+                .await
+            {
                 Ok(audio) => {
                     // Convert f32 samples to PCM bytes
                     let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
@@ -176,36 +190,189 @@ pub async fn create_wav_stream(
 
 /// Chunk text into sentences/phrases for streaming
 fn chunk_text(text: &str) -> Vec<String> {
-    // Simple chunking by sentence-ending punctuation
-    let delimiters = ['.', '!', '?', '\n'];
-    let mut chunks = Vec::new();
-    let mut current = String::new();
-
-    for word in text.split_whitespace() {
-        current.push_str(word);
-        current.push(' ');
-
-        // Check if word ends with any delimiter
-        if delimiters.iter().any(|&d| word.ends_with(d)) {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                chunks.push(trimmed);
-            }
-            current.clear();
-        }
-    }
-
-    // Add remaining text
-    if !current.trim().is_empty() {
-        chunks.push(current.trim().to_string());
-    }
-
-    // If no chunks found (no delimiters), return whole text
+    let mut chunks = split_text_into_speech_chunks(text, 10);
     if chunks.is_empty() && !text.trim().is_empty() {
         chunks.push(text.trim().to_string());
     }
-
     chunks
+}
+
+fn split_text_into_speech_chunks(text: &str, words_per_chunk: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut current_chunk = String::new();
+    let mut word_count = 0;
+
+    for word in text.split_whitespace() {
+        if !current_chunk.is_empty() {
+            current_chunk.push(' ');
+        }
+
+        let is_numbered_break = is_numbered_list_item(word);
+
+        if is_numbered_break && !current_chunk.is_empty() {
+            let trimmed = current_chunk.trim().to_string();
+            if !trimmed.is_empty() {
+                chunks.push(trimmed);
+            }
+            current_chunk.clear();
+            word_count = 0;
+        }
+
+        current_chunk.push_str(word);
+        word_count += 1;
+
+        let ends_with_unconditional = word.ends_with('.')
+            || word.ends_with('!')
+            || word.ends_with('?')
+            || word.ends_with(':')
+            || word.ends_with(';');
+        let ends_with_conditional = word.ends_with(',');
+
+        if ends_with_unconditional
+            || is_numbered_break
+            || (ends_with_conditional && word_count >= words_per_chunk)
+        {
+            let trimmed = current_chunk.trim().to_string();
+            if !trimmed.is_empty() {
+                chunks.push(trimmed);
+            }
+            current_chunk.clear();
+            word_count = 0;
+        }
+    }
+
+    if !current_chunk.trim().is_empty() {
+        chunks.push(current_chunk.trim().to_string());
+    }
+
+    let mut final_chunks = Vec::new();
+    for (index, chunk) in chunks.iter().enumerate() {
+        let threshold = 12;
+        let use_punctuation = index < 2;
+        let split_chunks = split_long_chunk_with_depth(chunk, threshold, use_punctuation, 0);
+        final_chunks.extend(split_chunks);
+    }
+
+    for i in 0..final_chunks.len().saturating_sub(1) {
+        let current = &final_chunks[i];
+        let words: Vec<&str> = current.trim().split_whitespace().collect();
+        if let Some(last_word) = words.last() {
+            if BREAK_WORDS.contains(&last_word.to_lowercase().as_str()) && words.len() > 1 {
+                let new_current = words[..words.len() - 1].join(" ");
+                let next_chunk = &final_chunks[i + 1];
+                let new_next = format!("{} {}", last_word, next_chunk);
+                final_chunks[i] = new_current;
+                final_chunks[i + 1] = new_next;
+            }
+        }
+    }
+
+    final_chunks.retain(|chunk| !chunk.trim().is_empty());
+    final_chunks
+}
+
+fn is_numbered_list_item(word: &str) -> bool {
+    static NUMBERED_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\(?[0-9]+[.\)\:],?$").expect("valid regex"));
+    NUMBERED_REGEX.is_match(word)
+}
+
+fn split_long_chunk_with_depth(
+    chunk: &str,
+    threshold: usize,
+    use_punctuation: bool,
+    depth: usize,
+) -> Vec<String> {
+    if depth >= 3 {
+        return vec![chunk.to_string()];
+    }
+
+    let words: Vec<&str> = chunk.split_whitespace().collect();
+    if words.len() < threshold {
+        return vec![chunk.to_string()];
+    }
+
+    let center = words.len() / 2;
+
+    if use_punctuation {
+        if let Some(pos) = find_closest_punctuation(&words, center, &[","]) {
+            if pos >= 3 && pos < words.len() {
+                let first_chunk = words[..pos].join(" ");
+                let second_chunk = words[pos..].join(" ");
+                let mut result = Vec::new();
+                result.extend(split_long_chunk_with_depth(
+                    &first_chunk,
+                    threshold,
+                    use_punctuation,
+                    depth + 1,
+                ));
+                result.extend(split_long_chunk_with_depth(
+                    &second_chunk,
+                    threshold,
+                    use_punctuation,
+                    depth + 1,
+                ));
+                return result;
+            }
+        }
+    }
+
+    if let Some(pos) = find_closest_break_word(&words, center, BREAK_WORDS) {
+        if pos >= 3 && pos < words.len() {
+            let first_chunk = words[..pos].join(" ");
+            let second_chunk = words[pos..].join(" ");
+            let mut result = Vec::new();
+            result.extend(split_long_chunk_with_depth(
+                &first_chunk,
+                threshold,
+                use_punctuation,
+                depth + 1,
+            ));
+            result.extend(split_long_chunk_with_depth(
+                &second_chunk,
+                threshold,
+                use_punctuation,
+                depth + 1,
+            ));
+            return result;
+        }
+    }
+
+    vec![chunk.to_string()]
+}
+
+fn find_closest_punctuation(words: &[&str], center: usize, punctuation: &[&str]) -> Option<usize> {
+    let mut closest_pos = None;
+    let mut min_distance = usize::MAX;
+
+    for (i, word) in words.iter().enumerate() {
+        if punctuation.iter().any(|p| word.ends_with(p)) {
+            let distance = if i < center { center - i } else { i - center };
+            if distance < min_distance {
+                min_distance = distance;
+                closest_pos = Some(i + 1);
+            }
+        }
+    }
+
+    closest_pos
+}
+
+fn find_closest_break_word(words: &[&str], center: usize, break_words: &[&str]) -> Option<usize> {
+    let mut closest_pos = None;
+    let mut min_distance = usize::MAX;
+
+    for (i, word) in words.iter().enumerate() {
+        if break_words.contains(&word.to_lowercase().as_str()) {
+            let distance = if i < center { center - i } else { i - center };
+            if distance < min_distance {
+                min_distance = distance;
+                closest_pos = Some(i);
+            }
+        }
+    }
+
+    closest_pos
 }
 
 /// Convert f32 samples [-1.0, 1.0] to 16-bit PCM bytes
@@ -282,6 +449,15 @@ mod tests {
         let chunks = chunk_text(text);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "Hello world this is a test");
+    }
+
+    #[test]
+    fn test_chunk_text_numbered_list() {
+        let text = "1. First item 2. Second item";
+        let chunks = chunk_text(text);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0], "1. First item");
+        assert_eq!(chunks[1], "2. Second item");
     }
 
     #[test]

@@ -16,6 +16,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing::{debug, error, info, warn};
@@ -37,6 +38,9 @@ pub struct SpeechRequest {
     /// Speed multiplier (0.25 to 4.0, default 1.0)
     #[serde(default = "default_speed")]
     pub speed: f32,
+    /// Leading silence in samples (applied once per request)
+    #[serde(default)]
+    pub initial_silence: Option<usize>,
     /// Whether to stream the response
     #[serde(default)]
     pub stream: Option<bool>,
@@ -206,7 +210,19 @@ async fn list_models_handler() -> ApiResult<impl IntoResponse> {
             owned_by: "kokoro".to_string(),
         },
         Model {
+            id: "tts-1-hd".to_string(),
+            object: "model".to_string(),
+            created: 1704067200,
+            owned_by: "kokoro".to_string(),
+        },
+        Model {
             id: "kokoro".to_string(),
+            object: "model".to_string(),
+            created: 1704067200,
+            owned_by: "kokoro".to_string(),
+        },
+        Model {
+            id: "gpt-4o-mini-tts".to_string(),
             object: "model".to_string(),
             created: 1704067200,
             owned_by: "kokoro".to_string(),
@@ -221,7 +237,14 @@ async fn list_models_handler() -> ApiResult<impl IntoResponse> {
 
 /// List available voices
 async fn list_voices_handler() -> impl IntoResponse {
-    let voices = get_available_voices().to_vec();
+    let mut voices = get_available_voices().to_vec();
+    let mut seen_ids: HashSet<String> = voices.iter().map(|voice| voice.id.clone()).collect();
+
+    for alias in openai_alias_voices() {
+        if seen_ids.insert(alias.id.clone()) {
+            voices.push(alias);
+        }
+    }
 
     Json(VoicesResponse {
         object: "list".to_string(),
@@ -241,6 +264,7 @@ async fn speech_handler(
         model = %req.model,
         voice = %req.voice,
         format = %req.response_format,
+        initial_silence = ?req.initial_silence,
         stream = ?req.stream,
         "Received speech request"
     );
@@ -274,6 +298,7 @@ async fn speech_handler(
                     req.input,
                     voice,
                     speed,
+                    req.initial_silence,
                     request_id.clone(),
                 )
                 .await?,
@@ -286,6 +311,7 @@ async fn speech_handler(
                     req.input,
                     voice,
                     speed,
+                    req.initial_silence,
                     request_id.clone(),
                 )
                 .await?,
@@ -310,7 +336,7 @@ async fn speech_handler(
         // Non-streaming response
         let audio_data = state
             .backend
-            .synthesize(&req.input, &voice, speed)
+            .synthesize(&req.input, &voice, speed, req.initial_silence)
             .await
             .map_err(|e| {
                 error!("Synthesis failed: {}", e);
@@ -341,6 +367,41 @@ async fn speech_handler(
             .body(Body::from(bytes))
             .map_err(|_| AppError::Internal)?)
     }
+}
+
+fn openai_alias_voices() -> Vec<Voice> {
+    vec![
+        Voice {
+            id: "alloy".to_string(),
+            name: "Alloy (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+        Voice {
+            id: "echo".to_string(),
+            name: "Echo (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+        Voice {
+            id: "fable".to_string(),
+            name: "Fable (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+        Voice {
+            id: "nova".to_string(),
+            name: "Nova (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+        Voice {
+            id: "onyx".to_string(),
+            name: "Onyx (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+        Voice {
+            id: "shimmer".to_string(),
+            name: "Shimmer (OpenAI alias)".to_string(),
+            preview_url: None,
+        },
+    ]
 }
 
 /// Encode float samples to WAV format

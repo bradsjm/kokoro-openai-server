@@ -101,7 +101,7 @@ impl Config {
     }
 
     pub fn accepted_model_ids() -> &'static [&'static str] {
-        &["tts-1", "kokoro"]
+        &["tts-1", "tts-1-hd", "kokoro", "gpt-4o-mini-tts"]
     }
 }
 
@@ -194,6 +194,8 @@ mod tests {
     fn test_accepted_model_ids() {
         let ids = Config::accepted_model_ids();
         assert!(ids.contains(&"tts-1"));
+        assert!(ids.contains(&"tts-1-hd"));
         assert!(ids.contains(&"kokoro"));
+        assert!(ids.contains(&"gpt-4o-mini-tts"));
     }
 }
