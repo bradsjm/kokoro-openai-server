@@ -20,6 +20,8 @@ pub struct KokoroBackend {
     semaphore: Arc<Semaphore>,
     /// Sample rate (Kokoro default is 24000)
     sample_rate: u32,
+    /// Configured upper bound for concurrent synth jobs
+    worker_limit: usize,
 }
 
 impl KokoroBackend {
@@ -57,7 +59,12 @@ impl KokoroBackend {
             tts_engine,
             semaphore: Arc::new(Semaphore::new(config.workers)),
             sample_rate: DEFAULT_SAMPLE_RATE,
+            worker_limit: config.workers,
         })
+    }
+
+    pub fn worker_limit(&self) -> usize {
+        self.worker_limit
     }
 
     /// Check if backend is healthy

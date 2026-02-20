@@ -1,8 +1,10 @@
 use crate::{backend::KokoroBackend, error::AppError, validation::DEFAULT_SAMPLE_RATE};
 use axum::body::{Body, Bytes};
 use regex::Regex;
+use std::collections::BTreeMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 use tracing::{debug, error, info, warn};
 
 const STREAM_CHANNEL_CAPACITY: usize = 8;
@@ -18,6 +20,7 @@ pub async fn create_pcm_stream(
     speed: f32,
     initial_silence: Option<usize>,
     request_id: String,
+    parallelism: usize,
 ) -> Result<Body, AppError> {
     // Chunk the text by sentences/phrases
     let chunks = chunk_text(&text);
@@ -31,52 +34,21 @@ pub async fn create_pcm_stream(
 
     let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(STREAM_CHANNEL_CAPACITY);
 
-    // Spawn synthesis task
     tokio::spawn(async move {
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let chunk_silence = if idx == 0 { initial_silence } else { None };
-            debug!(
-                request_id = %request_id,
-                chunk_idx = idx,
-                chunk_text = %chunk,
-                "Synthesizing chunk"
-            );
-
-            match backend
-                .synthesize(chunk, &voice, speed, chunk_silence)
-                .await
-            {
-                Ok(audio) => {
-                    // Convert f32 samples to PCM bytes
-                    let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
-
-                    if tx.send(Ok(Bytes::from(pcm_bytes))).await.is_err() {
-                        warn!("Stream receiver dropped, stopping synthesis");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        request_id = %request_id,
-                        chunk_idx = idx,
-                        error = %e,
-                        "Chunk synthesis failed"
-                    );
-                    let _ = tx
-                        .send(Err(std::io::Error::other(format!(
-                            "Synthesis failed: {}",
-                            e
-                        ))))
-                        .await;
-                    break;
-                }
-            }
-        }
-
-        info!(
-            request_id = %request_id,
-            "PCM stream synthesis complete"
-        );
+        stream_synthesis_chunks(
+            chunks,
+            StreamSynthesisConfig {
+                voice,
+                speed,
+                initial_silence,
+                request_id,
+                parallelism,
+                stream_kind: StreamKind::Pcm,
+            },
+            backend,
+            tx,
+        )
+        .await;
     });
 
     // Create body from receiver stream
@@ -97,6 +69,7 @@ pub async fn create_wav_stream(
     speed: f32,
     initial_silence: Option<usize>,
     request_id: String,
+    parallelism: usize,
 ) -> Result<Body, AppError> {
     // For WAV streaming, we need to:
     // 1. Write WAV header first
@@ -114,68 +87,21 @@ pub async fn create_wav_stream(
 
     let (tx, mut rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(STREAM_CHANNEL_CAPACITY);
 
-    // Spawn synthesis task
     tokio::spawn(async move {
-        const BITS_PER_SAMPLE: u16 = 16;
-        const NUM_CHANNELS: u16 = 1;
-
-        // Write WAV header (44 bytes, will be placeholder for streaming)
-        let header =
-            create_wav_header_placeholder(DEFAULT_SAMPLE_RATE, BITS_PER_SAMPLE, NUM_CHANNELS);
-
-        if tx.send(Ok(Bytes::from(header))).await.is_err() {
-            warn!("Stream receiver dropped immediately");
-            return;
-        }
-
-        let mut total_samples: u32 = 0;
-
-        for (idx, chunk) in chunks.iter().enumerate() {
-            let chunk_silence = if idx == 0 { initial_silence } else { None };
-            debug!(
-                request_id = %request_id,
-                chunk_idx = idx,
-                chunk_text = %chunk,
-                "Synthesizing chunk for WAV"
-            );
-
-            match backend
-                .synthesize(chunk, &voice, speed, chunk_silence)
-                .await
-            {
-                Ok(audio) => {
-                    // Convert f32 samples to PCM bytes
-                    let pcm_bytes = samples_to_pcm_bytes(&audio.samples);
-                    total_samples += audio.samples.len() as u32;
-
-                    if tx.send(Ok(Bytes::from(pcm_bytes))).await.is_err() {
-                        warn!("Stream receiver dropped, stopping synthesis");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        request_id = %request_id,
-                        chunk_idx = idx,
-                        error = %e,
-                        "Chunk synthesis failed"
-                    );
-                    let _ = tx
-                        .send(Err(std::io::Error::other(format!(
-                            "Synthesis failed: {}",
-                            e
-                        ))))
-                        .await;
-                    break;
-                }
-            }
-        }
-
-        info!(
-            request_id = %request_id,
-            total_samples = total_samples,
-            "WAV stream synthesis complete"
-        );
+        stream_synthesis_chunks(
+            chunks,
+            StreamSynthesisConfig {
+                voice,
+                speed,
+                initial_silence,
+                request_id,
+                parallelism,
+                stream_kind: StreamKind::Wav,
+            },
+            backend,
+            tx,
+        )
+        .await;
     });
 
     // Create body from receiver stream
@@ -195,6 +121,197 @@ fn chunk_text(text: &str) -> Vec<String> {
         chunks.push(text.trim().to_string());
     }
     chunks
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamKind {
+    Pcm,
+    Wav,
+}
+
+#[derive(Clone)]
+struct StreamSynthesisConfig {
+    voice: String,
+    speed: f32,
+    initial_silence: Option<usize>,
+    request_id: String,
+    parallelism: usize,
+    stream_kind: StreamKind,
+}
+
+#[derive(Clone)]
+struct ChunkWorkerContext {
+    backend: Arc<KokoroBackend>,
+    voice: String,
+    speed: f32,
+    request_id: String,
+}
+
+async fn stream_synthesis_chunks(
+    chunks: Vec<String>,
+    config: StreamSynthesisConfig,
+    backend: Arc<KokoroBackend>,
+    tx: mpsc::Sender<Result<Bytes, std::io::Error>>,
+) {
+    let StreamSynthesisConfig {
+        voice,
+        speed,
+        initial_silence,
+        request_id,
+        parallelism,
+        stream_kind,
+    } = config;
+
+    if chunks.is_empty() {
+        info!(request_id = %request_id, "No chunks to stream");
+        return;
+    }
+
+    if matches!(stream_kind, StreamKind::Wav) {
+        const BITS_PER_SAMPLE: u16 = 16;
+        const NUM_CHANNELS: u16 = 1;
+        let header =
+            create_wav_header_placeholder(DEFAULT_SAMPLE_RATE, BITS_PER_SAMPLE, NUM_CHANNELS);
+        if tx.send(Ok(Bytes::from(header))).await.is_err() {
+            warn!(request_id = %request_id, "Stream receiver dropped before WAV header");
+            return;
+        }
+    }
+
+    let max_in_flight = parallelism.max(1).min(chunks.len());
+    debug!(
+        request_id = %request_id,
+        chunk_count = chunks.len(),
+        max_in_flight = max_in_flight,
+        "Starting bounded parallel synthesis"
+    );
+
+    let mut join_set = JoinSet::new();
+    let mut next_to_spawn = 0usize;
+    let mut next_to_emit = 0usize;
+    let mut completed_chunks = 0usize;
+    let mut pending = BTreeMap::<usize, Bytes>::new();
+    let mut audio_bytes_sent = 0usize;
+    let worker_context = ChunkWorkerContext {
+        backend,
+        voice,
+        speed,
+        request_id: request_id.clone(),
+    };
+
+    while next_to_spawn < chunks.len() && join_set.len() < max_in_flight {
+        spawn_chunk_task(
+            &mut join_set,
+            &worker_context,
+            chunks[next_to_spawn].clone(),
+            next_to_spawn,
+            if next_to_spawn == 0 {
+                initial_silence
+            } else {
+                None
+            },
+        );
+        next_to_spawn += 1;
+    }
+
+    while completed_chunks < chunks.len() {
+        let joined = match join_set.join_next().await {
+            Some(joined) => joined,
+            None => break,
+        };
+
+        match joined {
+            Ok((idx, Ok(bytes))) => {
+                completed_chunks += 1;
+                pending.insert(idx, bytes);
+            }
+            Ok((idx, Err(err))) => {
+                error!(
+                    request_id = %request_id,
+                    chunk_idx = idx,
+                    error = %err,
+                    "Chunk synthesis failed"
+                );
+                let _ = tx.send(Err(err)).await;
+                return;
+            }
+            Err(join_error) => {
+                error!(
+                    request_id = %request_id,
+                    error = %join_error,
+                    "Chunk task join failed"
+                );
+                let _ = tx
+                    .send(Err(std::io::Error::other(format!(
+                        "Chunk task failed: {}",
+                        join_error
+                    ))))
+                    .await;
+                return;
+            }
+        }
+
+        while let Some(bytes) = pending.remove(&next_to_emit) {
+            audio_bytes_sent += bytes.len();
+            if tx.send(Ok(bytes)).await.is_err() {
+                warn!(request_id = %request_id, "Stream receiver dropped, stopping synthesis");
+                return;
+            }
+            next_to_emit += 1;
+        }
+
+        while next_to_spawn < chunks.len() && join_set.len() < max_in_flight {
+            spawn_chunk_task(
+                &mut join_set,
+                &worker_context,
+                chunks[next_to_spawn].clone(),
+                next_to_spawn,
+                if next_to_spawn == 0 {
+                    initial_silence
+                } else {
+                    None
+                },
+            );
+            next_to_spawn += 1;
+        }
+    }
+
+    info!(
+        request_id = %request_id,
+        streamed_chunks = next_to_emit,
+        bytes_sent = audio_bytes_sent,
+        "Streaming synthesis complete"
+    );
+}
+
+fn spawn_chunk_task(
+    join_set: &mut JoinSet<(usize, Result<Bytes, std::io::Error>)>,
+    context: &ChunkWorkerContext,
+    chunk: String,
+    chunk_idx: usize,
+    initial_silence: Option<usize>,
+) {
+    let backend = context.backend.clone();
+    let voice = context.voice.clone();
+    let speed = context.speed;
+    let request_id = context.request_id.clone();
+
+    join_set.spawn(async move {
+        debug!(
+            request_id = %request_id,
+            chunk_idx = chunk_idx,
+            chunk_text = %chunk,
+            "Synthesizing chunk"
+        );
+
+        let bytes = backend
+            .synthesize(&chunk, &voice, speed, initial_silence)
+            .await
+            .map(|audio| Bytes::from(samples_to_pcm_bytes(&audio.samples)))
+            .map_err(|e| std::io::Error::other(format!("Synthesis failed: {}", e)));
+
+        (chunk_idx, bytes)
+    });
 }
 
 fn split_text_into_speech_chunks(text: &str, words_per_chunk: usize) -> Vec<String> {
@@ -228,8 +345,7 @@ fn split_text_into_speech_chunks(text: &str, words_per_chunk: usize) -> Vec<Stri
             || word.ends_with(';');
         let ends_with_conditional = word.ends_with(',');
 
-        if ends_with_unconditional
-            || is_numbered_break
+        if (ends_with_unconditional && !is_numbered_break)
             || (ends_with_conditional && word_count >= words_per_chunk)
         {
             let trimmed = current_chunk.trim().to_string();
@@ -255,7 +371,7 @@ fn split_text_into_speech_chunks(text: &str, words_per_chunk: usize) -> Vec<Stri
 
     for i in 0..final_chunks.len().saturating_sub(1) {
         let current = &final_chunks[i];
-        let words: Vec<&str> = current.trim().split_whitespace().collect();
+        let words: Vec<&str> = current.split_whitespace().collect();
         if let Some(last_word) = words.last() {
             if BREAK_WORDS.contains(&last_word.to_lowercase().as_str()) && words.len() > 1 {
                 let new_current = words[..words.len() - 1].join(" ");
@@ -347,7 +463,7 @@ fn find_closest_punctuation(words: &[&str], center: usize, punctuation: &[&str])
 
     for (i, word) in words.iter().enumerate() {
         if punctuation.iter().any(|p| word.ends_with(p)) {
-            let distance = if i < center { center - i } else { i - center };
+            let distance = center.abs_diff(i);
             if distance < min_distance {
                 min_distance = distance;
                 closest_pos = Some(i + 1);
@@ -364,7 +480,7 @@ fn find_closest_break_word(words: &[&str], center: usize, break_words: &[&str]) 
 
     for (i, word) in words.iter().enumerate() {
         if break_words.contains(&word.to_lowercase().as_str()) {
-            let distance = if i < center { center - i } else { i - center };
+            let distance = center.abs_diff(i);
             if distance < min_distance {
                 min_distance = distance;
                 closest_pos = Some(i);

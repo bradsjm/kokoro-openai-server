@@ -2,8 +2,8 @@ use crate::{
     backend::KokoroBackend,
     error::{ApiResult, AppError},
     validation::{
-        get_available_voices, validate_input, validate_model, validate_response_format,
-        validate_speed, validate_voice, Voice,
+        get_available_voices, openai_alias_voices, validate_input, validate_model,
+        validate_response_format, validate_speed, validate_voice, Voice,
     },
 };
 use axum::{
@@ -15,6 +15,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use kokoros::utils::{mp3::pcm_to_mp3, opus::pcm_to_opus_ogg};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -32,7 +33,7 @@ pub struct SpeechRequest {
     /// Voice ID
     #[serde(default = "default_voice")]
     pub voice: String,
-    /// Response format ("wav" or "pcm")
+    /// Response format ("wav", "pcm", "mp3", "opus")
     #[serde(default = "default_response_format")]
     pub response_format: String,
     /// Speed multiplier (0.25 to 4.0, default 1.0)
@@ -275,7 +276,7 @@ async fn speech_handler(
     // Validate input
     validate_input(&req.input, state.max_input_chars)?;
 
-    // Validate response format (strict: wav and pcm only)
+    // Validate response format
     let format = validate_response_format(&req.response_format)?;
 
     // Validate voice
@@ -289,6 +290,14 @@ async fn speech_handler(
     let stream = req.stream.unwrap_or(false);
 
     if stream {
+        if format != "wav" && format != "pcm" {
+            return Err(AppError::invalid_request(
+                "Streaming currently supports only 'wav' and 'pcm' response_format values",
+            ));
+        }
+
+        let stream_parallelism = state.backend.worker_limit();
+
         // Streaming response
         let (content_type, body) = if format == "wav" {
             (
@@ -300,6 +309,7 @@ async fn speech_handler(
                     speed,
                     req.initial_silence,
                     request_id.clone(),
+                    stream_parallelism,
                 )
                 .await?,
             )
@@ -313,6 +323,7 @@ async fn speech_handler(
                     speed,
                     req.initial_silence,
                     request_id.clone(),
+                    stream_parallelism,
                 )
                 .await?,
             )
@@ -344,13 +355,21 @@ async fn speech_handler(
             })?;
 
         // Encode to requested format
-        let (content_type, bytes) = if format == "wav" {
-            (
+        let (content_type, bytes) = match format.as_str() {
+            "wav" => (
                 "audio/wav",
                 encode_wav(&audio_data.samples, audio_data.sample_rate)?,
-            )
-        } else {
-            ("audio/pcm", encode_pcm(&audio_data.samples))
+            ),
+            "pcm" => ("audio/pcm", encode_pcm(&audio_data.samples)),
+            "mp3" => (
+                "audio/mpeg",
+                encode_mp3(&audio_data.samples, audio_data.sample_rate)?,
+            ),
+            "opus" => (
+                "audio/opus",
+                encode_opus(&audio_data.samples, audio_data.sample_rate)?,
+            ),
+            _ => return Err(AppError::unsupported_format(format)),
         };
 
         info!(
@@ -367,41 +386,6 @@ async fn speech_handler(
             .body(Body::from(bytes))
             .map_err(|_| AppError::Internal)?)
     }
-}
-
-fn openai_alias_voices() -> Vec<Voice> {
-    vec![
-        Voice {
-            id: "alloy".to_string(),
-            name: "Alloy (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-        Voice {
-            id: "echo".to_string(),
-            name: "Echo (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-        Voice {
-            id: "fable".to_string(),
-            name: "Fable (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-        Voice {
-            id: "nova".to_string(),
-            name: "Nova (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-        Voice {
-            id: "onyx".to_string(),
-            name: "Onyx (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-        Voice {
-            id: "shimmer".to_string(),
-            name: "Shimmer (OpenAI alias)".to_string(),
-            preview_url: None,
-        },
-    ]
 }
 
 /// Encode float samples to WAV format
@@ -443,4 +427,26 @@ fn encode_pcm(samples: &[f32]) -> Bytes {
     }
 
     Bytes::from(bytes)
+}
+
+/// Encode float samples to MP3 format
+fn encode_mp3(samples: &[f32], sample_rate: u32) -> Result<Bytes, AppError> {
+    let owned_samples = samples.to_vec();
+    pcm_to_mp3(&owned_samples, sample_rate)
+        .map(Bytes::from)
+        .map_err(|e| {
+            error!(error = %e, "Failed to encode MP3");
+            AppError::Internal
+        })
+}
+
+/// Encode float samples to OPUS format (Ogg container)
+fn encode_opus(samples: &[f32], sample_rate: u32) -> Result<Bytes, AppError> {
+    let owned_samples = samples.to_vec();
+    pcm_to_opus_ogg(&owned_samples, sample_rate)
+        .map(Bytes::from)
+        .map_err(|e| {
+            error!(error = %e, "Failed to encode OPUS");
+            AppError::Internal
+        })
 }

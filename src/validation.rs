@@ -2,8 +2,25 @@ use crate::config::Config;
 use crate::error::{ApiResult, AppError};
 use std::sync::LazyLock;
 
-/// Valid response formats (strict Rust-only constraint)
-pub const VALID_RESPONSE_FORMATS: [&str; 2] = ["wav", "pcm"];
+/// Valid response formats
+pub const VALID_RESPONSE_FORMATS: [&str; 4] = ["wav", "pcm", "mp3", "opus"];
+
+/// OpenAI voice aliases mapped to Kokoro voice identifiers.
+pub const OPENAI_VOICE_ALIASES: [(&str, &str); 13] = [
+    ("alloy", "af_alloy"),
+    ("echo", "am_echo"),
+    ("fable", "bm_fable"),
+    ("nova", "af_nova"),
+    ("onyx", "am_onyx"),
+    ("shimmer", "af_shimmer"),
+    ("ash", "am_adam"),
+    ("ballad", "am_michael"),
+    ("verse", "am_eric"),
+    ("cedar", "am_liam"),
+    ("coral", "af_nicole"),
+    ("sage", "af_sarah"),
+    ("marin", "af_river"),
+];
 
 /// Default sample rate for Kokoro TTS
 pub const DEFAULT_SAMPLE_RATE: u32 = 24000;
@@ -272,22 +289,29 @@ pub fn validate_voice(voice: &str, available_voices: &[Voice]) -> ApiResult<Stri
     let resolved_voice = resolve_legacy_voice_alias(voice);
 
     if available_voices.iter().any(|v| v.id == resolved_voice) {
-        Ok(resolved_voice.to_string())
+        Ok(resolved_voice)
     } else {
         Err(AppError::voice_not_found(voice))
     }
 }
 
-fn resolve_legacy_voice_alias(voice: &str) -> &str {
-    match voice {
-        "alloy" => "af_alloy",
-        "echo" => "am_echo",
-        "fable" => "bm_fable",
-        "nova" => "af_nova",
-        "onyx" => "am_onyx",
-        "shimmer" => "af_shimmer",
-        _ => voice,
-    }
+fn resolve_legacy_voice_alias(voice: &str) -> String {
+    OPENAI_VOICE_ALIASES
+        .iter()
+        .find(|(alias, _)| alias.eq_ignore_ascii_case(voice))
+        .map(|(_, kokoro)| (*kokoro).to_string())
+        .unwrap_or_else(|| voice.to_string())
+}
+
+pub fn openai_alias_voices() -> Vec<Voice> {
+    OPENAI_VOICE_ALIASES
+        .iter()
+        .map(|(alias, kokoro)| Voice {
+            id: (*alias).to_string(),
+            name: format!("{} (OpenAI alias for {})", alias, kokoro),
+            preview_url: None,
+        })
+        .collect()
 }
 
 /// Validate speed parameter (0.25 to 4.0)
@@ -332,8 +356,11 @@ mod tests {
         assert!(validate_response_format("WAV").is_ok());
         assert!(validate_response_format("pcm").is_ok());
         assert!(validate_response_format("PCM").is_ok());
-        assert!(validate_response_format("mp3").is_err());
-        assert!(validate_response_format("opus").is_err());
+        assert!(validate_response_format("mp3").is_ok());
+        assert!(validate_response_format("MP3").is_ok());
+        assert!(validate_response_format("opus").is_ok());
+        assert!(validate_response_format("OPUS").is_ok());
+        assert!(validate_response_format("flac").is_err());
     }
 
     #[test]
@@ -393,6 +420,41 @@ mod tests {
                 name: "Shimmer".to_string(),
                 preview_url: None,
             },
+            Voice {
+                id: "am_adam".to_string(),
+                name: "Adam".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "am_michael".to_string(),
+                name: "Michael".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "am_eric".to_string(),
+                name: "Eric".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "am_liam".to_string(),
+                name: "Liam".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "af_nicole".to_string(),
+                name: "Nicole".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "af_sarah".to_string(),
+                name: "Sarah".to_string(),
+                preview_url: None,
+            },
+            Voice {
+                id: "af_river".to_string(),
+                name: "River".to_string(),
+                preview_url: None,
+            },
         ];
 
         assert_eq!(validate_voice("alloy", &voices).unwrap(), "af_alloy");
@@ -401,5 +463,23 @@ mod tests {
         assert_eq!(validate_voice("nova", &voices).unwrap(), "af_nova");
         assert_eq!(validate_voice("onyx", &voices).unwrap(), "am_onyx");
         assert_eq!(validate_voice("shimmer", &voices).unwrap(), "af_shimmer");
+        assert_eq!(validate_voice("ash", &voices).unwrap(), "am_adam");
+        assert_eq!(validate_voice("ballad", &voices).unwrap(), "am_michael");
+        assert_eq!(validate_voice("verse", &voices).unwrap(), "am_eric");
+        assert_eq!(validate_voice("cedar", &voices).unwrap(), "am_liam");
+        assert_eq!(validate_voice("coral", &voices).unwrap(), "af_nicole");
+        assert_eq!(validate_voice("sage", &voices).unwrap(), "af_sarah");
+        assert_eq!(validate_voice("marin", &voices).unwrap(), "af_river");
+    }
+
+    #[test]
+    fn test_validate_voice_accepts_case_insensitive_aliases() {
+        let voices = vec![Voice {
+            id: "am_echo".to_string(),
+            name: "Echo".to_string(),
+            preview_url: None,
+        }];
+
+        assert_eq!(validate_voice("EcHo", &voices).unwrap(), "am_echo");
     }
 }

@@ -100,7 +100,7 @@ impl IntoResponse for AppError {
                 StatusCode::BAD_REQUEST,
                 "invalid_request_error",
                 format!(
-                    "Response format '{}' not supported. Supported formats: wav, pcm",
+                    "Response format '{}' not supported. Supported formats: wav, pcm, mp3, opus",
                     format
                 ),
                 Some("response_format".to_string()),
