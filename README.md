@@ -10,10 +10,10 @@ An OpenAI-compatible TTS (Text-to-Speech) server implementation using the Kokoro
 
 - **OpenAI API Compatible**: Drop-in replacement for OpenAI's `/v1/audio/speech` endpoint
 - **Pure Rust**: No external dependencies, strict Rust-only implementation
-- **Streaming Support**: Real-time audio streaming with chunked transfer encoding
+- **Streaming Support**: Real-time, ordered, bounded parallel streaming for low-latency chunked responses
 - **Multiple Voices**: 49 voices across 8 languages (English, Chinese, Japanese, Spanish, French, Hindi, Italian, Portuguese)
 - **Hardware Acceleration**: CoreML execution provider support for Metal acceleration on macOS
-- **Strict Format Support**: WAV and PCM formats only (no external codec dependencies)
+- **Multiple Output Formats**: WAV, PCM, MP3, and Opus output support
 - **API Key Authentication**: Optional Bearer token authentication for secure deployment
 - **Flexible Configuration**: Configure via environment variables or command-line arguments
 - **Health Monitoring**: Built-in health check endpoints for monitoring and orchestration
@@ -163,7 +163,7 @@ curl -X POST http://localhost:8000/v1/audio/speech \
 | model | String | Yes | Model ID (`tts-1` or `kokoro`) |
 | input | String | Yes | Text to convert to speech |
 | voice | String | Yes | Voice ID (see [Voice Reference](#voice-reference)) |
-| response_format | String | No | Audio format: `wav` or `pcm` (default: `wav`) |
+| response_format | String | No | Audio format: `wav`, `pcm`, `mp3`, or `opus` (default: `wav`) |
 | speed | Float | No | Speech speed multiplier (default: 1.0) |
 | stream | Boolean | No | Stream audio as it's generated (default: false) |
 
@@ -206,7 +206,7 @@ Lists available voices.
 curl http://localhost:8000/v1/audio/voices
 ```
 
-Response: List of 49 available voices
+Response: List of Kokoro voices plus OpenAI-compatible alias voices
 
 ## Examples
 
@@ -240,6 +240,8 @@ curl -X POST http://localhost:8000/v1/audio/speech \
   --output - | ffplay -
 ```
 
+**Note**: Streaming currently supports `wav` and `pcm` response formats.
+
 ### Custom Speed
 
 ```bash
@@ -264,6 +266,9 @@ curl http://localhost:8000/health
 Response: `{"status":"ok"}`
 
 ## Voice Reference
+
+OpenAI-compatible alias voices are accepted and mapped internally:
+`alloy`, `echo`, `fable`, `nova`, `onyx`, `shimmer`, `ash`, `ballad`, `verse`, `cedar`, `coral`, `sage`, `marin`.
 
 ### American English (af/am)
 - `af_alloy`, `af_heart`, `af_nova`, `af_river`, `af_shimmer`
@@ -306,8 +311,10 @@ Response: `{"status":"ok"}`
 |--------|--------------|-------------|
 | `wav` | `audio/wav` | WAV audio file |
 | `pcm` | `audio/pcm` | Raw PCM 16-bit little-endian |
+| `mp3` | `audio/mpeg` | MP3 encoded audio |
+| `opus` | `audio/opus` | Opus audio in Ogg container |
 
-**Note**: Only `wav` and `pcm` are supported. Other formats (mp3, opus, aac, flac) will return a 400 error to maintain strict Rust-only dependencies.
+**Note**: Non-streaming requests support all listed formats. Streaming requests support `wav` and `pcm`.
 
 ## Building from Source
 
@@ -384,11 +391,11 @@ kokoro-openai-server/
 **Problem:** "Unsupported format" error.
 
 **Solutions:**
-- Use only `wav` or `pcm` formats
-- Other formats (mp3, opus, aac, flac) are not supported
+- Use one of: `wav`, `pcm`, `mp3`, `opus`
+- For streaming requests, use only `wav` or `pcm`
 - Convert your audio using FFmpeg if needed:
   ```bash
-  ffmpeg -i input.mp3 -acodec pcm_s16le output.wav
+  ffmpeg -i input.opus -acodec pcm_s16le output.wav
   ```
 
 ### Memory Issues
@@ -447,7 +454,7 @@ RUST_LOG=kokoro_openai_server=debug,axum=warn ./kokoro-openai-server
 #### Request Validation
 
 - **Model ID validation**: Only `tts-1` and `kokoro` are accepted
-- **Voice validation**: Voice ID must be from the supported list
+- **Voice validation**: Voice ID must be from the supported list (OpenAI alias voices are also accepted)
 - **Input length**: Limited to `KOKORO_MAX_INPUT_CHARS` (default: 4096)
 - **Required parameters**: Both `input` and `voice` are mandatory
 
