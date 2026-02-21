@@ -1,6 +1,6 @@
 [package]
 name = "kokoro-openai-server"
-version = "0.2.1"
+version = "0.2.3"
 edition = "2021"
 authors = ["Kokoro OpenAI Server Contributors"]
 description = "OpenAI-compatible TTS server for Kokoro model"
