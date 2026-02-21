@@ -1,0 +1,85 @@
+name: macOS ARM64 Compile Probe
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  compile:
+    name: Compile on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-latest
+            experimental: false
+          - runner: macos-26
+            experimental: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Runner diagnostics
+        run: |
+          uname -a
+          sw_vers
+          xcodebuild -version
+          rustc -Vv
+          cargo -V
+          brew --version
+
+      - name: Install Kokoros native dependencies
+        run: |
+          if ! brew list --versions pkg-config > /dev/null; then
+            brew install pkg-config
+          fi
+
+          if ! brew list --versions opus > /dev/null; then
+            brew install opus
+          fi
+
+      - name: Verify native dependencies
+        run: |
+          pkg-config --version
+          pkg-config --modversion opus
+          pkg-config --libs opus
+
+      - name: Publish dependency summary
+        run: |
+          {
+            echo "## Dependency Report"
+            echo
+            echo "- Runner: ${{ matrix.runner }}"
+            echo "- Experimental: ${{ matrix.experimental }}"
+            echo
+            echo "### Versions"
+            echo
+            echo "- Rust: $(rustc -V)"
+            echo "- Cargo: $(cargo -V)"
+            echo "- Homebrew: $(brew --version | head -n1)"
+            echo "- pkg-config: $(pkg-config --version)"
+            echo "- opus: $(pkg-config --modversion opus)"
+            echo
+            echo "### Brew Packages"
+            echo
+            echo '```text'
+            brew list --versions pkg-config opus
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Build default profile
+        run: cargo build --release --verbose
+
+      - name: Build CPU feature profile
+        run: cargo build --release --no-default-features --features cpu --verbose
