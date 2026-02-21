@@ -1,0 +1,170 @@
+name: Release
+
+permissions:
+    contents: write
+
+on:
+    workflow_dispatch:
+        inputs:
+            publish:
+                description: "Publish GitHub release assets"
+                required: false
+                default: false
+                type: boolean
+            release_tag:
+                description: "Tag to publish when using workflow_dispatch (e.g. v0.2.1)"
+                required: false
+                default: ""
+                type: string
+    push:
+        tags:
+            - "**[0-9]+.[0-9]+.[0-9]+*"
+
+jobs:
+    build-and-release:
+        name: build-and-release (${{ matrix.platform }}-${{ matrix.arch }})
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 45
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - runner: macos-14
+                      platform: macos
+                      arch: arm64
+
+        env:
+            BINARY_NAME: kokoro-openai-server
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Set up Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Cache cargo artifacts
+              uses: Swatinem/rust-cache@v2
+
+            - name: Runner diagnostics
+              run: |
+                  uname -a
+                  sw_vers
+                  xcodebuild -version
+                  rustc -Vv
+                  cargo -V
+                  brew --version
+
+            - name: Install native dependencies
+              run: |
+                  if ! brew list --versions pkg-config > /dev/null; then
+                    brew install pkg-config
+                  fi
+
+                  if ! brew list --versions opus > /dev/null; then
+                    brew install opus
+                  fi
+
+            - name: Verify native dependencies
+              run: |
+                  pkg-config --version
+                  pkg-config --modversion opus
+                  pkg-config --libs opus
+
+            - name: Build CoreML release binary
+              # Do not add `--target aarch64-apple-darwin` here. Native ARM macOS
+              # runners fail this path in CI via `espeak-rs-sys` custom build script.
+              run: cargo build --release --no-default-features --features coreml --verbose
+
+            - name: Package release assets
+              env:
+                  PLATFORM: ${{ matrix.platform }}
+                  ARCH: ${{ matrix.arch }}
+              run: |
+                  set -euo pipefail
+
+                  if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+                    VERSION="${GITHUB_REF_NAME}"
+                    PKG_VERSION="${GITHUB_REF_NAME#v}"
+                  elif [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+                    VERSION="${{ inputs.release_tag }}"
+                    PKG_VERSION="${{ inputs.release_tag }}"
+                    PKG_VERSION="${PKG_VERSION#v}"
+                  else
+                    VERSION="manual-${GITHUB_SHA::7}"
+                    PKG_VERSION="0.0.0"
+                  fi
+
+                  PKG_VERSION="${PKG_VERSION%%-*}"
+                  if [[ -z "${PKG_VERSION}" ]]; then
+                    PKG_VERSION="0.0.0"
+                  fi
+
+                  ASSET_BASENAME="${BINARY_NAME}-${VERSION}-${PLATFORM}-${ARCH}"
+                  DIST_DIR="dist"
+                  PKGROOT_DIR="${DIST_DIR}/pkgroot"
+
+                  mkdir -p "${DIST_DIR}" "${PKGROOT_DIR}/usr/local/bin"
+
+                  cp "target/release/${BINARY_NAME}" "${DIST_DIR}/${ASSET_BASENAME}"
+                  cp "target/release/${BINARY_NAME}" "${PKGROOT_DIR}/usr/local/bin/${BINARY_NAME}"
+
+                  tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
+                  shasum -a 256 "${DIST_DIR}/${ASSET_BASENAME}.tar.gz" > "${DIST_DIR}/${ASSET_BASENAME}.sha256"
+
+                  pkgbuild \
+                    --root "${PKGROOT_DIR}" \
+                    --identifier "com.bradsjm.kokoro-openai-server" \
+                    --version "${PKG_VERSION}" \
+                    --install-location "/" \
+                    "${DIST_DIR}/${ASSET_BASENAME}.pkg"
+
+                  {
+                    echo "## Release Artifact Report"
+                    echo
+                    echo "- Runner: ${{ matrix.runner }}"
+                    echo "- Version: ${VERSION}"
+                    echo
+                    echo "### Tool Versions"
+                    echo
+                    echo "- Rust: $(rustc -V)"
+                    echo "- Cargo: $(cargo -V)"
+                    echo "- Homebrew: $(brew --version)"
+                    echo "- pkg-config: $(pkg-config --version)"
+                    echo "- opus: $(pkg-config --modversion opus)"
+                    echo
+                    echo "### Artifacts"
+                    echo
+                    echo '```text'
+                    ls -1 "${DIST_DIR}"
+                    echo '```'
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+            - name: Upload workflow artifacts
+              uses: actions/upload-artifact@v4
+              with:
+                  name: release-assets-${{ matrix.platform }}-${{ matrix.arch }}
+                  path: |
+                      dist/*.tar.gz
+                      dist/*.sha256
+                      dist/*.pkg
+                      dist/kokoro-openai-server-*
+                  if-no-files-found: error
+
+            - name: Validate manual publish input
+              if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish && inputs.release_tag == '' }}
+              run: |
+                  echo "release_tag is required when publish=true via workflow_dispatch" >&2
+                  exit 1
+
+            - name: Publish GitHub Release
+              if: ${{ github.ref_type == 'tag' || (github.event_name == 'workflow_dispatch' && inputs.publish) }}
+              uses: softprops/action-gh-release@v2
+              with:
+                  tag_name: ${{ github.ref_type == 'tag' && github.ref_name || inputs.release_tag }}
+                  prerelease: ${{ contains(github.ref_type == 'tag' && github.ref_name || inputs.release_tag, '-') }}
+                  generate_release_notes: true
+                  files: |
+                      dist/*.tar.gz
+                      dist/*.sha256
+                      dist/*.pkg
