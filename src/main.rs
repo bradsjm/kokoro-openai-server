@@ -7,6 +7,7 @@ mod api;
 mod backend;
 mod config;
 mod error;
+mod runtime_assets;
 mod streaming;
 mod validation;
 
@@ -45,6 +46,10 @@ async fn main() -> Result<()> {
     } else {
         warn!("  Authentication: disabled (set API_KEY to enable)");
     }
+
+    runtime_assets::ensure_runtime_assets()
+        .await
+        .context("Failed to prepare runtime assets")?;
 
     // Initialize backend
     let backend = backend::KokoroBackend::new(&config)

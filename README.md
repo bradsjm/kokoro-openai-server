@@ -105,6 +105,8 @@ The server can be configured using environment variables or command-line argumen
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `KOKORO_MODEL_PATH` | Auto | Path to Kokoro ONNX model (optional, auto-downloads if not provided) |
+| `KOKORO_PIPER_PHONEMIZE_URL` | Auto | Override URL used to download `piper-phonemize` runtime assets (includes `espeak-ng-data`) |
+| `PIPER_ESPEAKNG_DATA_DIRECTORY` | Auto | Directory containing `espeak-ng-data`; auto-discovered or auto-downloaded when unset |
 | `KOKORO_ACCELERATION` | `auto` | Hardware acceleration mode: `auto`, `cpu`, `coreml`, `cuda`, `directml` |
 | `KOKORO_WORKERS` | `1` | Number of parallel inference workers (1-8) |
 | `KOKORO_MAX_INPUT_CHARS` | `4096` | Maximum input text length in characters |
