@@ -110,7 +110,10 @@ jobs:
                   cp "target/release/${BINARY_NAME}" "${PKGROOT_DIR}/usr/local/bin/${BINARY_NAME}"
 
                   tar -C "${DIST_DIR}" -czf "${DIST_DIR}/${ASSET_BASENAME}.tar.gz" "${ASSET_BASENAME}"
-                  shasum -a 256 "${DIST_DIR}/${ASSET_BASENAME}.tar.gz" > "${DIST_DIR}/${ASSET_BASENAME}.sha256"
+                  (
+                    cd "${DIST_DIR}"
+                    shasum -a 256 "${ASSET_BASENAME}.tar.gz" > "${ASSET_BASENAME}.sha256"
+                  )
 
                   pkgbuild \
                     --root "${PKGROOT_DIR}" \
@@ -118,6 +121,75 @@ jobs:
                     --version "${PKG_VERSION}" \
                     --install-location "/" \
                     "${DIST_DIR}/${ASSET_BASENAME}.pkg"
+
+                  cat > "${DIST_DIR}/${BINARY_NAME}-installer.sh" <<'EOF'
+                  #!/usr/bin/env bash
+                  set -euo pipefail
+
+                  REPO="${KOKORO_REPO:-bradsjm/kokoro-openai-server}"
+                  BINARY_NAME="kokoro-openai-server"
+                  PLATFORM="macos"
+                  ARCH="arm64"
+                  INSTALL_DIR="${KOKORO_INSTALL_DIR:-/usr/local/bin}"
+
+                  os="$(uname -s)"
+                  cpu="$(uname -m)"
+
+                  if [[ "${os}" != "Darwin" || "${cpu}" != "arm64" ]]; then
+                    echo "This installer only supports Apple Silicon macOS (darwin/arm64)." >&2
+                    exit 1
+                  fi
+
+                  VERSION="${KOKORO_VERSION:-}"
+                  if [[ -z "${VERSION}" ]]; then
+                    latest_url="$(curl --proto '=https' --tlsv1.2 -Ls -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+                    VERSION="${latest_url##*/}"
+                  fi
+
+                  if [[ -z "${VERSION}" || "${VERSION}" == "latest" ]]; then
+                    echo "Unable to determine release version. Set KOKORO_VERSION (for example: v0.2.1)." >&2
+                    exit 1
+                  fi
+
+                  asset_basename="${BINARY_NAME}-${VERSION}-${PLATFORM}-${ARCH}"
+                  archive_name="${asset_basename}.tar.gz"
+                  checksum_name="${asset_basename}.sha256"
+                  base_url="https://github.com/${REPO}/releases/download/${VERSION}"
+
+                  tmpdir="$(mktemp -d)"
+                  trap 'rm -rf "${tmpdir}"' EXIT
+
+                  echo "Downloading ${archive_name}..."
+                  curl --proto '=https' --tlsv1.2 -LsSf "${base_url}/${archive_name}" -o "${tmpdir}/${archive_name}"
+                  curl --proto '=https' --tlsv1.2 -LsSf "${base_url}/${checksum_name}" -o "${tmpdir}/${checksum_name}"
+
+                  expected_sha="$(awk '{print $1}' "${tmpdir}/${checksum_name}")"
+                  actual_sha="$(shasum -a 256 "${tmpdir}/${archive_name}" | awk '{print $1}')"
+                  if [[ "${expected_sha}" != "${actual_sha}" ]]; then
+                    echo "Checksum verification failed for ${archive_name}." >&2
+                    exit 1
+                  fi
+
+                  tar -xzf "${tmpdir}/${archive_name}" -C "${tmpdir}"
+
+                  if [[ ! -f "${tmpdir}/${asset_basename}" ]]; then
+                    echo "Expected binary ${asset_basename} not found in archive." >&2
+                    exit 1
+                  fi
+
+                  install_cmd=""
+                  if [[ ! -w "${INSTALL_DIR}" ]]; then
+                    install_cmd="sudo"
+                  fi
+
+                  ${install_cmd} mkdir -p "${INSTALL_DIR}"
+                  ${install_cmd} install -m 755 "${tmpdir}/${asset_basename}" "${INSTALL_DIR}/${BINARY_NAME}"
+
+                  echo "Installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
+                  echo "Run '${BINARY_NAME} --help' to get started."
+                  EOF
+
+                  chmod +x "${DIST_DIR}/${BINARY_NAME}-installer.sh"
 
                   {
                     echo "## Release Artifact Report"
@@ -148,6 +220,7 @@ jobs:
                       dist/*.tar.gz
                       dist/*.sha256
                       dist/*.pkg
+                      dist/*-installer.sh
                       dist/kokoro-openai-server-*
                   if-no-files-found: error
 
@@ -168,3 +241,4 @@ jobs:
                       dist/*.tar.gz
                       dist/*.sha256
                       dist/*.pkg
+                      dist/*-installer.sh

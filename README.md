@@ -33,7 +33,23 @@ An OpenAI-compatible TTS (Text-to-Speech) server implementation using the Kokoro
 
 ### Quick Install (Binary Release)
 
-Download the binary directly from the [releases page](https://github.com/bradsjm/kokoro-openai-server/releases).
+Apple Silicon macOS (`darwin/arm64`) install using the latest release:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bradsjm/kokoro-openai-server/releases/latest/download/kokoro-openai-server-installer.sh | sh
+```
+
+Install a pinned version:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bradsjm/kokoro-openai-server/releases/latest/download/kokoro-openai-server-installer.sh | KOKORO_VERSION=v0.2.1 sh
+```
+
+Installer options:
+- `KOKORO_VERSION` (example: `v0.2.1`) to pin a release
+- `KOKORO_INSTALL_DIR` (default: `/usr/local/bin`) to choose install path
+
+Release assets are available on the [releases page](https://github.com/bradsjm/kokoro-openai-server/releases).
 
 ### Build from Source
 
